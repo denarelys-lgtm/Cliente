@@ -48,12 +48,12 @@ class MainActivity : AppCompatActivity() {
 
     private var isCameraAvailable = true
     private var isCameraStreaming = false
-    private var currentCameraFacing = 0 // 0=trasera, 1=frontal
+    private var currentCameraFacing = 0 // 0 = trasera, 1 = frontal
 
     private var screenListenerThread: Thread? = null
     private var cameraListenerThread: Thread? = null
 
-    // --- mDNS ---
+    // mDNS
     private lateinit var nsdManager: NsdManager
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -138,7 +138,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== mDNS ====================
+    // ==================== mDNS Discovery ====================
     private fun startMdnsDiscovery() {
         val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         multicastLock = wifiManager.createMulticastLock("ScreenClient::mDNS").apply {
@@ -148,7 +148,7 @@ class MainActivity : AppCompatActivity() {
 
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
-                runOnUiThread { Toast.makeText(this@MainActivity, "Buscando servidor...", Toast.LENGTH_SHORT).show() }
+                runOnUiThread { Toast.makeText(this@MainActivity, "Buscando servidor en la red...", Toast.LENGTH_SHORT).show() }
             }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
@@ -182,7 +182,6 @@ class MainActivity : AppCompatActivity() {
         discoveryListener = listener
         nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
 
-        // Timeout
         uiHandler.postDelayed({
             if (discoveredServerIp == null) {
                 nsdManager.stopServiceDiscovery(discoveryListener)
@@ -190,7 +189,7 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "No se encontró servidor. Usando IP local.", Toast.LENGTH_LONG).show()
                 multicastLock?.release()
             }
-        }, 6000)
+        }, 7000)
     }
 
     private fun getServerIp(): String = discoveredServerIp ?: SERVER_IP_FALLBACK
@@ -204,7 +203,6 @@ class MainActivity : AppCompatActivity() {
                     if (serverSocket == null || serverSocket.isClosed) {
                         serverSocket = ServerSocket(NOTIFY_PORT)
                     }
-
                     val socket = serverSocket.accept()
                     val command = socket.getInputStream().bufferedReader().readLine()
                     socket.close()
@@ -216,7 +214,7 @@ class MainActivity : AppCompatActivity() {
                                 currentCameraFacing = facing
                                 isCameraAvailable = true
                                 updateCameraStatusText()
-                                Toast.makeText(this@MainActivity, "Cámara ${getCameraName()} disponible", Toast.LENGTH_SHORT).show()
+                                Toast.makeText(this@MainActivity, "¡Cámara ${getCameraName()} disponible!", Toast.LENGTH_SHORT).show()
                             }
                             command?.startsWith("CAMERA_UNAVAILABLE:") == true -> {
                                 val facing = command.substringAfter(":").toIntOrNull() ?: 0
@@ -265,17 +263,14 @@ class MainActivity : AppCompatActivity() {
                         tcpNoDelay = true
                         receiveBufferSize = 512 * 1024
                     }
-
                     val dis = DataInputStream(socket.getInputStream())
                     val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
 
                     while (isRunning.get()) {
                         val length = dis.readInt()
                         if (length <= 0 || length > 2_000_000) continue
-
                         val data = ByteArray(length)
                         dis.readFully(data)
-
                         val bmp = BitmapFactory.decodeByteArray(data, 0, length, options) ?: continue
 
                         uiHandler.post {
@@ -294,7 +289,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== Camera Listener (Optimizado para Redmi) ====================
+    // ==================== Camera Listener (Optimizado para Redmi Note 14 Pro+) ====================
     private fun startCameraListener() {
         cameraListenerThread = thread(start = true) {
             while (isRunning.get()) {
@@ -317,10 +312,10 @@ class MainActivity : AppCompatActivity() {
 
                         var bmp = BitmapFactory.decodeByteArray(data, 0, length, options) ?: continue
 
-                        // Rotación optimizada para Redmi Note 14 Pro+
+                        // Rotación específica para Redmi Note 14 Pro+
                         val matrix = Matrix().apply {
                             postRotate(if (currentCameraFacing == 1) 270f else 90f)
-                            if (currentCameraFacing == 1) postScale(-1f, 1f) // Espejo frontal
+                            if (currentCameraFacing == 1) postScale(-1f, 1f) // Espejo para cámara frontal
                         }
 
                         val transformed = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
@@ -338,7 +333,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    // Error silencioso (reconexión)
+                    // Error de conexión - se reintentará
                 } finally {
                     isCameraStreaming = false
                     uiHandler.post { updateCameraStatusText() }
@@ -360,7 +355,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    Toast.makeText(this, "Error enviando comando: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Error al enviar comando: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
@@ -370,14 +365,18 @@ class MainActivity : AppCompatActivity() {
         isRunning.set(false)
         screenListenerThread?.interrupt()
         cameraListenerThread?.interrupt()
+
         try {
             screenServerSocket?.close()
             cameraServerSocket?.close()
         } catch (e: Exception) {}
+
         previousScreenBitmap?.recycle()
         previousCameraBitmap?.recycle()
+
         nsdManager.stopServiceDiscovery(discoveryListener)
         multicastLock?.release()
+
         super.onDestroy()
     }
 }
