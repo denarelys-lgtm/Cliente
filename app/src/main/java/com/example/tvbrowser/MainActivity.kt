@@ -48,12 +48,12 @@ class MainActivity : AppCompatActivity() {
 
     private var isCameraAvailable = true
     private var isCameraStreaming = false
-    private var currentCameraFacing = 0 // 0=back, 1=front
+    private var currentCameraFacing = 0 // 0=trasera, 1=frontal
 
     private var screenListenerThread: Thread? = null
     private var cameraListenerThread: Thread? = null
 
-    // --- mDNdS ---
+    // --- mDNS ---
     private lateinit var nsdManager: NsdManager
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -71,13 +71,9 @@ class MainActivity : AppCompatActivity() {
         nsdManager = getSystemService(Context.NSD_SERVICE) as NsdManager
 
         setupButtons()
-
-        // Iniciar los listeners de streams inmediatamente
         startScreenListener()
         startCameraListener()
         startNotificationListener()
-
-        // Iniciar descubrimiento mDNS
         startMdnsDiscovery()
     }
 
@@ -110,30 +106,39 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.btnStopCamera).setOnClickListener {
             enviarComando("STOP_CAMERA")
-            isCameraStreaming = false
-            updateCameraStatusText()
-            runOnUiThread {
-                previousCameraBitmap?.recycle()
-                previousCameraBitmap = null
-                imgCamera.setImageBitmap(null)
-            }
+            stopCameraStreaming()
         }
 
         findViewById<Button>(R.id.btnStopAll).setOnClickListener {
             enviarComando("STOP")
-            isCameraStreaming = false
-            updateCameraStatusText()
-            runOnUiThread {
-                previousScreenBitmap?.recycle()
-                previousScreenBitmap = null
-                imgScreen.setImageBitmap(null)
-                previousCameraBitmap?.recycle()
-                previousCameraBitmap = null
-                imgCamera.setImageBitmap(null)
-            }
+            stopAllStreams()
         }
     }
 
+    private fun stopCameraStreaming() {
+        isCameraStreaming = false
+        updateCameraStatusText()
+        runOnUiThread {
+            previousCameraBitmap?.recycle()
+            previousCameraBitmap = null
+            imgCamera.setImageBitmap(null)
+        }
+    }
+
+    private fun stopAllStreams() {
+        isCameraStreaming = false
+        updateCameraStatusText()
+        runOnUiThread {
+            previousScreenBitmap?.recycle()
+            previousScreenBitmap = null
+            imgScreen.setImageBitmap(null)
+            previousCameraBitmap?.recycle()
+            previousCameraBitmap = null
+            imgCamera.setImageBitmap(null)
+        }
+    }
+
+    // ==================== mDNS ====================
     private fun startMdnsDiscovery() {
         val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         multicastLock = wifiManager.createMulticastLock("ScreenClient::mDNS").apply {
@@ -143,9 +148,7 @@ class MainActivity : AppCompatActivity() {
 
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
-                runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Buscando servidor en la red...", Toast.LENGTH_SHORT).show()
-                }
+                runOnUiThread { Toast.makeText(this@MainActivity, "Buscando servidor...", Toast.LENGTH_SHORT).show() }
             }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
@@ -153,15 +156,12 @@ class MainActivity : AppCompatActivity() {
                     nsdManager.resolveService(serviceInfo, object : NsdManager.ResolveListener {
                         override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
                         override fun onServiceResolved(resolvedInfo: NsdServiceInfo) {
-                            val host = resolvedInfo.host
-                            if (host != null) {
-                                discoveredServerIp = host.hostAddress
-                                runOnUiThread {
-                                    Toast.makeText(this@MainActivity, "Servidor encontrado: $discoveredServerIp", Toast.LENGTH_LONG).show()
-                                }
-                                nsdManager.stopServiceDiscovery(this@MainActivity.discoveryListener)
-                                multicastLock?.release()
+                            discoveredServerIp = resolvedInfo.host.hostAddress
+                            runOnUiThread {
+                                Toast.makeText(this@MainActivity, "Servidor encontrado: $discoveredServerIp", Toast.LENGTH_LONG).show()
                             }
+                            nsdManager.stopServiceDiscovery(discoveryListener)
+                            multicastLock?.release()
                         }
                     })
                 }
@@ -171,7 +171,7 @@ class MainActivity : AppCompatActivity() {
             override fun onDiscoveryStopped(serviceType: String) {}
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Fallo al descubrir. Usando IP local.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "Fallo en descubrimiento. Usando IP local.", Toast.LENGTH_LONG).show()
                     discoveredServerIp = SERVER_IP_FALLBACK
                 }
                 multicastLock?.release()
@@ -182,6 +182,7 @@ class MainActivity : AppCompatActivity() {
         discoveryListener = listener
         nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
 
+        // Timeout
         uiHandler.postDelayed({
             if (discoveredServerIp == null) {
                 nsdManager.stopServiceDiscovery(discoveryListener)
@@ -189,54 +190,51 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "No se encontró servidor. Usando IP local.", Toast.LENGTH_LONG).show()
                 multicastLock?.release()
             }
-        }, 5000)
+        }, 6000)
     }
 
     private fun getServerIp(): String = discoveredServerIp ?: SERVER_IP_FALLBACK
 
+    // ==================== Notification Listener ====================
     private fun startNotificationListener() {
         thread(start = true) {
+            var serverSocket: ServerSocket? = null
             while (isRunning.get()) {
                 try {
-                    ServerSocket(NOTIFY_PORT).use { serverSocket ->
-                        while (isRunning.get()) {
-                            try {
-                                val socket = serverSocket.accept()
-                                val command = socket.getInputStream().bufferedReader().readLine()
-                                uiHandler.post {
-                                    when {
-                                        command?.startsWith("CAMERA_AVAILABLE:") == true -> {
-                                            val facingStr = command.substringAfter(":")
-                                            currentCameraFacing = facingStr.toIntOrNull() ?: 0
-                                            isCameraAvailable = true
-                                            updateCameraStatusText()
-                                            Toast.makeText(this@MainActivity, "¡Cámara ${getCameraName()} disponible!", Toast.LENGTH_SHORT).show()
-                                        }
-                                        command?.startsWith("CAMERA_UNAVAILABLE:") == true -> {
-                                            val facingStr = command.substringAfter(":")
-                                            currentCameraFacing = facingStr.toIntOrNull() ?: 0
-                                            isCameraAvailable = false
-                                            isCameraStreaming = false
-                                            updateCameraStatusText()
-                                            previousCameraBitmap?.recycle()
-                                            previousCameraBitmap = null
-                                            imgCamera.setImageBitmap(null)
-                                            Toast.makeText(this@MainActivity, "Cámara ${getCameraName()} en uso por otra app", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
-                                }
-                                socket.close()
-                            } catch (e: Exception) {
-                                if (!isRunning.get()) break
-                                Thread.sleep(1000)
+                    if (serverSocket == null || serverSocket.isClosed) {
+                        serverSocket = ServerSocket(NOTIFY_PORT)
+                    }
+
+                    val socket = serverSocket.accept()
+                    val command = socket.getInputStream().bufferedReader().readLine()
+                    socket.close()
+
+                    uiHandler.post {
+                        when {
+                            command?.startsWith("CAMERA_AVAILABLE:") == true -> {
+                                val facing = command.substringAfter(":").toIntOrNull() ?: 0
+                                currentCameraFacing = facing
+                                isCameraAvailable = true
+                                updateCameraStatusText()
+                                Toast.makeText(this@MainActivity, "Cámara ${getCameraName()} disponible", Toast.LENGTH_SHORT).show()
+                            }
+                            command?.startsWith("CAMERA_UNAVAILABLE:") == true -> {
+                                val facing = command.substringAfter(":").toIntOrNull() ?: 0
+                                currentCameraFacing = facing
+                                isCameraAvailable = false
+                                isCameraStreaming = false
+                                updateCameraStatusText()
+                                stopCameraStreaming()
+                                Toast.makeText(this@MainActivity, "Cámara ${getCameraName()} no disponible", Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
                 } catch (e: Exception) {
                     if (!isRunning.get()) break
-                    Thread.sleep(5000)
+                    Thread.sleep(2000)
                 }
             }
+            serverSocket?.close()
         }
     }
 
@@ -257,121 +255,96 @@ class MainActivity : AppCompatActivity() {
         txtCameraStatus.setTextColor(ContextCompat.getColor(this, color))
     }
 
+    // ==================== Screen Listener ====================
     private fun startScreenListener() {
-        screenListenerThread = thread(start = true, priority = Thread.MAX_PRIORITY) {
+        screenListenerThread = thread(start = true) {
             while (isRunning.get()) {
                 try {
                     screenServerSocket = ServerSocket(SCREEN_PORT)
-                    val socket = screenServerSocket!!.accept()
-                    socket.tcpNoDelay = true
-                    socket.receiveBufferSize = 1024 * 512
-                    val dis = DataInputStream(socket.getInputStream())
-                    val options = BitmapFactory.Options().apply {
-                        inPreferredConfig = Bitmap.Config.RGB_565
+                    val socket = screenServerSocket!!.accept().apply {
+                        tcpNoDelay = true
+                        receiveBufferSize = 512 * 1024
                     }
+
+                    val dis = DataInputStream(socket.getInputStream())
+                    val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+
                     while (isRunning.get()) {
-                        try {
-                            val length = dis.readInt()
-                            if (length <= 0 || length > 2_000_000) continue
-                            val data = ByteArray(length)
-                            dis.readFully(data)
-                            val bmp = BitmapFactory.decodeByteArray(data, 0, length, options)
-                            if (bmp != null) {
-                                uiHandler.post {
-                                    previousScreenBitmap?.recycle()
-                                    previousScreenBitmap = bmp
-                                    imgScreen.setImageBitmap(bmp)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            break
+                        val length = dis.readInt()
+                        if (length <= 0 || length > 2_000_000) continue
+
+                        val data = ByteArray(length)
+                        dis.readFully(data)
+
+                        val bmp = BitmapFactory.decodeByteArray(data, 0, length, options) ?: continue
+
+                        uiHandler.post {
+                            previousScreenBitmap?.recycle()
+                            previousScreenBitmap = bmp
+                            imgScreen.setImageBitmap(bmp)
                         }
                     }
-                    socket.close()
-                    screenServerSocket?.close()
                 } catch (e: Exception) {
-                    // Reintentar
+                    // Reconexión
+                } finally {
+                    screenServerSocket?.close()
                 }
-                if (isRunning.get()) {
-                    uiHandler.post {
-                        Toast.makeText(this@MainActivity, "Reconectando stream de pantalla...", Toast.LENGTH_SHORT).show()
-                    }
-                    Thread.sleep(5000)
-                }
+                if (isRunning.get()) Thread.sleep(4000)
             }
         }
     }
 
-    /**
-     * CORRECCIÓN DE PROTOCOLO BINARIO: Alineado exactamente con el output del Servidor.
-     */
+    // ==================== Camera Listener (Optimizado para Redmi) ====================
     private fun startCameraListener() {
-        cameraListenerThread = thread(start = true, priority = Thread.MAX_PRIORITY) {
+        cameraListenerThread = thread(start = true) {
             while (isRunning.get()) {
                 try {
                     cameraServerSocket = ServerSocket(CAMERA_PORT)
-                    val socket = cameraServerSocket!!.accept()
-                    socket.tcpNoDelay = true
-                    socket.receiveBufferSize = 1024 * 512
-                    val dis = DataInputStream(socket.getInputStream())
-                    val options = BitmapFactory.Options().apply {
-                        inPreferredConfig = Bitmap.Config.RGB_565
+                    val socket = cameraServerSocket!!.accept().apply {
+                        tcpNoDelay = true
+                        receiveBufferSize = 512 * 1024
                     }
+
+                    val dis = DataInputStream(socket.getInputStream())
+                    val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+
                     while (isRunning.get()) {
-                        try {
-                            // LEER ÚNICAMENTE EL TAMAÑO (Igual que hace el servidor al enviar)
-                            val length = dis.readInt()
-                            if (length <= 0 || length > 2_000_000) continue
-                            
-                            val data = ByteArray(length)
-                            dis.readFully(data)
-                            
-                            var bmp = BitmapFactory.decodeByteArray(data, 0, length, options)
-                            if (bmp != null) {
-                                // Aplicamos rotación estándar (en tu Redmi Note 14 Pro+ los sensores nativos YUV suelen requerir 90º o 270º en modo vertical)
-                                val matrix = Matrix()
-                                val rotationAngle = if (currentCameraFacing == 1) 270f else 90f
-                                matrix.postRotate(rotationAngle)
-                                
-                                if (currentCameraFacing == 1) {
-                                    // Efecto espejo para la cámara frontal
-                                    matrix.postScale(-1f, 1f)
-                                }
-                                
-                                val transformed = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-                                if (transformed != bmp) {
-                                    bmp.recycle()
-                                    bmp = transformed
-                                }
-                                
-                                if (!isCameraStreaming) {
-                                    isCameraStreaming = true
-                                    uiHandler.post { updateCameraStatusText() }
-                                }
-                                
-                                uiHandler.post {
-                                    previousCameraBitmap?.recycle()
-                                    previousCameraBitmap = bmp
-                                    imgCamera.setImageBitmap(bmp)
-                                }
-                            }
-                        } catch (e: Exception) {
-                            break
+                        val length = dis.readInt()
+                        if (length <= 0 || length > 2_000_000) continue
+
+                        val data = ByteArray(length)
+                        dis.readFully(data)
+
+                        var bmp = BitmapFactory.decodeByteArray(data, 0, length, options) ?: continue
+
+                        // Rotación optimizada para Redmi Note 14 Pro+
+                        val matrix = Matrix().apply {
+                            postRotate(if (currentCameraFacing == 1) 270f else 90f)
+                            if (currentCameraFacing == 1) postScale(-1f, 1f) // Espejo frontal
+                        }
+
+                        val transformed = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
+                        if (transformed != bmp) bmp.recycle()
+
+                        if (!isCameraStreaming) {
+                            isCameraStreaming = true
+                            uiHandler.post { updateCameraStatusText() }
+                        }
+
+                        uiHandler.post {
+                            previousCameraBitmap?.recycle()
+                            previousCameraBitmap = transformed
+                            imgCamera.setImageBitmap(transformed)
                         }
                     }
-                    socket.close()
-                    cameraServerSocket?.close()
+                } catch (e: Exception) {
+                    // Error silencioso (reconexión)
+                } finally {
                     isCameraStreaming = false
                     uiHandler.post { updateCameraStatusText() }
-                } catch (e: Exception) {
-                    // Reintentar
                 }
-                if (isRunning.get()) {
-                    uiHandler.post {
-                        Toast.makeText(this@MainActivity, "Reconectando stream de cámara...", Toast.LENGTH_SHORT).show()
-                    }
-                    Thread.sleep(5000)
-                }
+
+                if (isRunning.get()) Thread.sleep(3000)
             }
         }
     }
@@ -380,14 +353,14 @@ class MainActivity : AppCompatActivity() {
         thread {
             try {
                 Socket().use { socket ->
-                    socket.connect(InetSocketAddress(getServerIp(), 9001), 1000)
+                    socket.connect(InetSocketAddress(getServerIp(), 9001), 1500)
                     socket.tcpNoDelay = true
                     socket.getOutputStream().write((cmd + "\n").toByteArray())
                     socket.getOutputStream().flush()
                 }
             } catch (e: Exception) {
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Error al enviar comando: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "Error enviando comando: ${e.message}", Toast.LENGTH_SHORT).show()
                 }
             }
         }
