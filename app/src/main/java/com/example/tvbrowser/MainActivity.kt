@@ -10,6 +10,7 @@ import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.ImageView
@@ -26,6 +27,7 @@ import kotlin.concurrent.thread
 
 class MainActivity : AppCompatActivity() {
 
+    private val TAG = "ClientMainActivity"
     private val SERVER_IP_FALLBACK = "127.0.0.1"
     private var discoveredServerIp: String? = null
 
@@ -58,6 +60,9 @@ class MainActivity : AppCompatActivity() {
     private var discoveryListener: NsdManager.DiscoveryListener? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private val SERVICE_TYPE = "_screenstream._tcp."
+    
+    // 🔥 Bandera de control para evitar llamadas duplicadas a stopServiceDiscovery
+    private val isDiscoveryActive = AtomicBoolean(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -148,6 +153,7 @@ class MainActivity : AppCompatActivity() {
 
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
+                isDiscoveryActive.set(true)
                 runOnUiThread { Toast.makeText(this@MainActivity, "Buscando servidor en la red...", Toast.LENGTH_SHORT).show() }
             }
 
@@ -160,36 +166,71 @@ class MainActivity : AppCompatActivity() {
                             runOnUiThread {
                                 Toast.makeText(this@MainActivity, "Servidor encontrado: $discoveredServerIp", Toast.LENGTH_LONG).show()
                             }
-                            nsdManager.stopServiceDiscovery(discoveryListener)
-                            multicastLock?.release()
+                            // 🔥 CORREGIDO: Apagado seguro tras resolver exitosamente
+                            stopNsdDiscoverySafely()
                         }
                     })
                 }
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {}
-            override fun onDiscoveryStopped(serviceType: String) {}
+            override fun onDiscoveryStopped(serviceType: String) {
+                isDiscoveryActive.set(false)
+            }
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                isDiscoveryActive.set(false)
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Fallo en descubrimiento. Usando IP local.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "Fallo en descubrimiento. Usando IP local.", Toast.LENGTH_SHORT).show()
                     discoveredServerIp = SERVER_IP_FALLBACK
                 }
-                multicastLock?.release()
+                safelyReleaseMulticast()
             }
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+                isDiscoveryActive.set(false)
+            }
         }
 
         discoveryListener = listener
-        nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        try {
+            nsdManager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error al iniciar discoverServices", e)
+        }
 
         uiHandler.postDelayed({
             if (discoveredServerIp == null) {
-                nsdManager.stopServiceDiscovery(discoveryListener)
+                // 🔥 CORREGIDO: Timeout seguro, ya no crasheará si el listener ya se removió
+                stopNsdDiscoverySafely()
                 discoveredServerIp = SERVER_IP_FALLBACK
                 Toast.makeText(this, "No se encontró servidor. Usando IP local.", Toast.LENGTH_LONG).show()
-                multicastLock?.release()
             }
         }, 7000)
+    }
+
+    // 🔥 NUEVO MÉTODO: Encargado de apagar NSD de forma atómica y segura
+    private fun stopNsdDiscoverySafely() {
+        if (isDiscoveryActive.compareAndSet(true, false)) {
+            try {
+                discoveryListener?.let {
+                    nsdManager.stopServiceDiscovery(it)
+                    Log.i(TAG, "✅ Descubrimiento mDNS detenido de manera segura.")
+                }
+            } catch (e: IllegalArgumentException) {
+                Log.w(TAG, "⚠️ El listener no estaba registrado al intentar detenerlo.", e)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error inesperado al detener NSD", e)
+            } finally {
+                safelyReleaseMulticast()
+            }
+        }
+    }
+
+    private fun safelyReleaseMulticast() {
+        try {
+            if (multicastLock?.isHeld == true) {
+                multicastLock?.release()
+            }
+        } catch (_: Exception) {}
     }
 
     private fun getServerIp(): String = discoveredServerIp ?: SERVER_IP_FALLBACK
@@ -232,7 +273,7 @@ class MainActivity : AppCompatActivity() {
                     Thread.sleep(2000)
                 }
             }
-            serverSocket?.close()
+            try { serverSocket?.close() } catch (_: Exception) {}
         }
     }
 
@@ -282,14 +323,14 @@ class MainActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     // Reconexión
                 } finally {
-                    screenServerSocket?.close()
+                    try { screenServerSocket?.close() } catch (_: Exception) {}
                 }
                 if (isRunning.get()) Thread.sleep(4000)
             }
         }
     }
 
-    // ==================== Camera Listener (Optimizado para Redmi Note 14 Pro+) ====================
+    // ==================== Camera Listener ====================
     private fun startCameraListener() {
         cameraListenerThread = thread(start = true) {
             while (isRunning.get()) {
@@ -312,10 +353,9 @@ class MainActivity : AppCompatActivity() {
 
                         var bmp = BitmapFactory.decodeByteArray(data, 0, length, options) ?: continue
 
-                        // Rotación específica para Redmi Note 14 Pro+
                         val matrix = Matrix().apply {
                             postRotate(if (currentCameraFacing == 1) 270f else 90f)
-                            if (currentCameraFacing == 1) postScale(-1f, 1f) // Espejo para cámara frontal
+                            if (currentCameraFacing == 1) postScale(-1f, 1f)
                         }
 
                         val transformed = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
@@ -333,10 +373,11 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 } catch (e: Exception) {
-                    // Error de conexión - se reintentará
+                    // Error de conexión
                 } finally {
                     isCameraStreaming = false
                     uiHandler.post { updateCameraStatusText() }
+                    try { cameraServerSocket?.close() } catch (_: Exception) {}
                 }
 
                 if (isRunning.get()) Thread.sleep(3000)
@@ -361,21 +402,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // 🔥 TOTALMENTE PROTEGIDO: Cierre definitivo sin fugas ni crashes por remoción repetida
     override fun onDestroy() {
         isRunning.set(false)
+        uiHandler.removeCallbacksAndMessages(null)
+        
         screenListenerThread?.interrupt()
         cameraListenerThread?.interrupt()
+
+        // Detener descubrimiento mDNS de forma segura usando nuestra función blindada
+        stopNsdDiscoverySafely()
 
         try {
             screenServerSocket?.close()
             cameraServerSocket?.close()
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
 
         previousScreenBitmap?.recycle()
         previousCameraBitmap?.recycle()
-
-        nsdManager.stopServiceDiscovery(discoveryListener)
-        multicastLock?.release()
 
         super.onDestroy()
     }
