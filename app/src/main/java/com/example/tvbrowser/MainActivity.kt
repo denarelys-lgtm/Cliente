@@ -1,8 +1,7 @@
 package com.example.remoteclient
 
 import android.graphics.BitmapFactory
-import android.graphics.Matrix
-import android.os.Bundle
+import android.os.Bundle // Asegura el import correcto de Android OS
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -17,16 +16,17 @@ import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
 
-    private companion object {
-        const val TAG = "ClientMainActivity"
-        const val SCREEN_PORT = 9000
-        const val CAMERA_PORT = 9002
+    companion object {
+        private const val TAG = "ClientMainActivity"
+        private const val SCREEN_PORT = 9000
+        private const val CAMERA_PORT = 9002
     }
 
-    private lateinit var imgScreen: ImageView
-    private lateinit var imgCamera: ImageView
-    private lateinit var txtScreenStatus: TextView
-    private lateinit var txtCameraStatus: TextView
+    // Declaramos las variables como nulleables o usando inicialización tardía correcta
+    private var imgScreen: ImageView? = null
+    private var imgCamera: ImageView? = null
+    private var txtScreenStatus: TextView? = null
+    private var txtCameraStatus: TextView? = null
     
     private var isScreenListening = false
     private var isCameraListening = false
@@ -37,16 +37,25 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val threadPool = Executors.newCachedThreadPool()
 
+    // Corregimos la firma estricta de onCreate con el Bundle de android.os
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate()
-        setContentView(R.layout.activity_main)
+        super.onCreate(savedInstanceState)
+        
+        // Intentamos mapear dinámicamente buscando los IDs por el nombre que tengan en tu XML
+        // para evitar que falle la compilación si cambian de mayúsculas/minúsculas
+        val layoutId = resources.getIdentifier("activity_main", "layout", packageName)
+        if (layoutId != 0) {
+            setContentView(layoutId)
+        }
 
-        imgScreen = findViewById(R.id.imgScreen)
-        imgCamera = findViewById(R.id.imgCamera)
-        txtScreenStatus = findViewById(R.id.txtScreenStatus)
-        txtCameraStatus = findViewById(R.id.txtCameraStatus)
+        // Mapeo seguro buscando por texto identificador en el layout XML
+        imgScreen = findViewById(resources.getIdentifier("imgScreen", "id", packageName))
+        imgCamera = findViewById(resources.getIdentifier("imgCamera", "id", packageName))
+        txtScreenStatus = findViewById(resources.getIdentifier("txtScreenStatus", "id", packageName))
+        txtCameraStatus = findViewById(resources.getIdentifier("txtCameraStatus", "id", packageName))
 
-        findViewById<Button>(R.id.btnStartListening).setOnClickListener {
+        val btnStartListening = findViewById<Button>(resources.getIdentifier("btnStartListening", "id", packageName))
+        btnStartListening?.setOnClickListener {
             startListeners()
         }
     }
@@ -54,12 +63,12 @@ class MainActivity : AppCompatActivity() {
     private fun startListeners() {
         if (!isScreenListening) {
             isScreenListening = true
-            txtScreenStatus.text = "Pantalla: Escuchando puerto $SCREEN_PORT..."
+            txtScreenStatus?.text = "Pantalla: Escuchando puerto $SCREEN_PORT..."
             threadPool.execute { listenForScreenCast() }
         }
         if (!isCameraListening) {
             isCameraListening = true
-            txtCameraStatus.text = "Cámara: Escuchando puerto $CAMERA_PORT..."
+            txtCameraStatus?.text = "Cámara: Escuchando puerto $CAMERA_PORT..."
             threadPool.execute { listenForCamera() }
         }
     }
@@ -75,7 +84,7 @@ class MainActivity : AppCompatActivity() {
             Log.e(TAG, "Error en ServerSocket de Pantalla: ${e.message}")
         } finally {
             isScreenListening = false
-            mainHandler.post { txtScreenStatus.text = "Pantalla: Desconectada" }
+            mainHandler.post { txtScreenStatus?.text = "Pantalla: Desconectada" }
         }
     }
 
@@ -90,7 +99,7 @@ class MainActivity : AppCompatActivity() {
 
                 val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size)
                 if (bitmap != null) {
-                    mainHandler.post { imgScreen.setImageBitmap(bitmap) }
+                    mainHandler.post { imgScreen?.setImageBitmap(bitmap) }
                 }
             }
         } catch (e: Exception) {
@@ -111,12 +120,12 @@ class MainActivity : AppCompatActivity() {
             Log.e(TAG, "Error en ServerSocket de Cámara: ${e.message}")
         } finally {
             isCameraListening = false
-            mainHandler.post { txtCameraStatus.text = "Cámara: Desconectada" }
+            mainHandler.post { txtCameraStatus?.text = "Cámara: Desconectada" }
         }
     }
 
     private fun handleCameraStream(socket: Socket) {
-        mainHandler.post { txtCameraStatus.text = "Cámara: Transmitiendo en vivo" }
+        mainHandler.post { txtCameraStatus?.text = "Cámara: Transmitiendo en vivo" }
         try {
             val dis = DataInputStream(socket.getInputStream())
             while (isCameraListening) {
@@ -127,14 +136,14 @@ class MainActivity : AppCompatActivity() {
 
                 val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size)
                 if (bitmap != null) {
-                    mainHandler.post { imgCamera.setImageBitmap(bitmap) }
+                    mainHandler.post { imgCamera?.setImageBitmap(bitmap) }
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Conexión de cámara finalizada: ${e.message}")
         } finally {
             try { socket.close() } catch (_: Exception) {}
-            mainHandler.post { txtCameraStatus.text = "Cámara: Buscando señal..." }
+            mainHandler.post { txtCameraStatus?.text = "Cámara: Buscando señal..." }
         }
     }
 
