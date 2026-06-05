@@ -1,4 +1,4 @@
-package com.example.remotescreamclient
+package com.example.remoteclient
 
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
